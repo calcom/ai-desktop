@@ -44,6 +44,10 @@ pub async fn run_clipboard_oneshot<R: Runtime>(app: AppHandle<R>) {
 
     let question = wrap_customer_message(&clipboard_text);
 
+    // Let the user know we're on it. The full round-trip is ~2s, so this
+    // both confirms the hotkey fired and bridges the wait.
+    notify(&app, APP_TITLE, "Composing a reply…");
+
     // 3. Stream + buffer.
     let result = ask_collect(
         &snapshot.base_url,

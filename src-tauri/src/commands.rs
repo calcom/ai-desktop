@@ -198,12 +198,18 @@ pub fn show_or_create_window<R: Runtime>(app: &AppHandle<R>, kind: WindowKind) -
 
     builder = match kind {
         WindowKind::Composer => builder
-            .inner_size(640.0, 480.0)
-            .min_inner_size(560.0, 420.0)
+            .inner_size(720.0, 96.0)
+            .min_inner_size(720.0, 64.0)
             .always_on_top(true)
             .decorations(false)
             .transparent(true)
-            .shadow(false)
+            // Native macOS shadow follows the transparent window's alpha
+            // mask, so it traces the rounded card. Doing this in CSS would
+            // clip at the window edge.
+            .shadow(true)
+            // resizable must be true on macOS for programmatic setSize to
+            // apply; without decorations there are no drag handles anyway.
+            .resizable(true)
             .skip_taskbar(true),
         WindowKind::Settings => builder
             .inner_size(560.0, 480.0)

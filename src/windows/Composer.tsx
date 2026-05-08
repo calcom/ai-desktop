@@ -1,10 +1,23 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
+import { LogicalSize } from "@tauri-apps/api/dpi";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { writeText, readText } from "@tauri-apps/plugin-clipboard-manager";
 import { tauri, type Voice } from "../lib/tauri";
 import { useSettings } from "../hooks/useSettings";
 import { useAskStream } from "../hooks/useAskStream";
 import { wrapCustomerMessage } from "../lib/wrap";
+import { voiceColor, voiceDisplayName } from "../lib/voiceTheme";
+
+const COMPOSER_WIDTH = 720;
 
 export function Composer() {
   const { settings } = useSettings();
@@ -12,27 +25,28 @@ export function Composer() {
   const [input, setInput] = useState("");
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const shellRef = useRef<HTMLDivElement>(null);
 
-  // Pre-fill from clipboard on mount, and respond to prefill events from Rust.
+  // Pre-fill from clipboard on mount and on prefill events from Rust.
+  // Trim surrounding whitespace — clipboard contents from Slack/Gmail
+  // often carry trailing newlines that would otherwise stretch the
+  // textarea (and the auto-sized window) for no reason.
   useEffect(() => {
     let cancelled = false;
     void readText()
       .then((t) => {
-        if (!cancelled && t && !input) {
-          setInput(t);
-        }
+        if (!cancelled && t && !input) setInput(t.trim());
       })
-      .catch(() => {
-        // ignore — clipboard may be empty/non-text
-      });
+      .catch(() => {});
 
     const unlisten = listen<string>("composer-prefill", (event) => {
-      if (event.payload && !stream.text) {
-        setInput(event.payload);
-        reset();
-      }
+      // Reopening via shortcut should always feel fresh.
+      reset();
+      setCopyState("idle");
+      if (event.payload) setInput(event.payload.trim());
+      textareaRef.current?.focus();
+      textareaRef.current?.select();
     });
-
     return () => {
       cancelled = true;
       void unlisten.then((u) => u());
@@ -41,11 +55,71 @@ export function Composer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Focus textarea on mount.
+  // Auto-size the window to fit content. Spotlight/Raycast feel: starts
+  // compact (just input + footer), grows when results appear, shrinks
+  // back when reset. We use ResizeObserver as the primary trigger and
+  // also fire an explicit resync after every render that could affect
+  // layout — belt + suspenders, since macOS swallows occasional setSize
+  // calls during rapid stream updates.
+  const resizeRafRef = useRef<number>(0);
+  const applyHeight = useCallback((h: number) => {
+    if (h <= 0) return;
+    cancelAnimationFrame(resizeRafRef.current);
+    resizeRafRef.current = requestAnimationFrame(() => {
+      // Small buffer keeps the rounded bottom edge from being clipped.
+      void getCurrentWebviewWindow().setSize(
+        new LogicalSize(COMPOSER_WIDTH, Math.ceil(h) + 4),
+      );
+    });
+  }, []);
+
+  useEffect(() => {
+    const el = shellRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const blockSize = entry.borderBoxSize?.[0]?.blockSize;
+      applyHeight(
+        typeof blockSize === "number"
+          ? blockSize
+          : el.getBoundingClientRect().height,
+      );
+    });
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(resizeRafRef.current);
+    };
+  }, [applyHeight]);
+
+  // Focus + select on mount for one-keystroke editing.
   useEffect(() => {
     textareaRef.current?.focus();
     textareaRef.current?.select();
   }, []);
+
+  // Manual auto-grow. We don't rely on CSS `field-sizing: content`
+  // because WKWebView support is recent and inconsistent. The textarea
+  // grows to its scrollHeight up to a fixed cap; the outer
+  // ResizeObserver picks the new height up and resizes the window.
+  const autosize = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const max = 128;
+    el.style.height = Math.min(el.scrollHeight, max) + "px";
+  }, []);
+
+  // Run autosize before paint so the textarea height is correct in the
+  // same frame the parent measures itself. Then explicitly sync the
+  // window size against the freshly-measured shell height.
+  useLayoutEffect(() => {
+    autosize();
+    const el = shellRef.current;
+    if (!el) return;
+    applyHeight(el.getBoundingClientRect().height);
+  });
 
   const activeVoice: Voice | undefined = useMemo(() => {
     if (!settings) return undefined;
@@ -55,8 +129,11 @@ export function Composer() {
     );
   }, [settings]);
 
+  const accent = voiceColor(activeVoice?.key ?? "default");
+
   const canGenerate =
     !!settings?.api_key && !!input.trim() && stream.status !== "streaming";
+  const canCopy = stream.status === "done" && !!stream.text;
 
   const handleGenerate = useCallback(() => {
     if (!settings?.api_key || !input.trim()) return;
@@ -69,7 +146,7 @@ export function Composer() {
   }, [settings, input, start]);
 
   const handleCopy = useCallback(async () => {
-    if (stream.status !== "done" || !stream.text) return;
+    if (!canCopy) return;
     try {
       await writeText(stream.text);
       setCopyState("copied");
@@ -77,7 +154,7 @@ export function Composer() {
     } catch (e) {
       console.error("copy failed", e);
     }
-  }, [stream.status, stream.text]);
+  }, [canCopy, stream.text]);
 
   const handleVoiceCycle = useCallback(() => {
     if (!settings || settings.voices.length < 2) return;
@@ -91,19 +168,16 @@ export function Composer() {
   // Keyboard shortcuts.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Escape → close window
       if (e.key === "Escape") {
         e.preventDefault();
         void tauri.closeWindow("composer");
         return;
       }
-      // Cmd+Enter → generate
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.shiftKey) {
         e.preventDefault();
         handleGenerate();
         return;
       }
-      // Cmd+Shift+C → copy
       if (
         e.key.toLowerCase() === "c" &&
         (e.metaKey || e.ctrlKey) &&
@@ -118,181 +192,315 @@ export function Composer() {
     return () => window.removeEventListener("keydown", onKey);
   }, [handleGenerate, handleCopy]);
 
+  // Empty state until settings loaded.
   if (!settings) {
+    return <Shell shellRef={shellRef}>{null}</Shell>;
+  }
+
+  // Unconfigured state.
+  if (!settings.has_api_key) {
     return (
-      <div className="h-full flex items-center justify-center text-[oklch(0.62_0_0)]">
-        Loading…
-      </div>
+      <Shell shellRef={shellRef}>
+        <div className="flex flex-col items-center justify-center gap-3 px-8 py-10 text-center">
+          <div className="text-[13px] text-[oklch(0.92_0_0)]">
+            Cal.ai isn't configured yet.
+          </div>
+          <button
+            onClick={() => void tauri.openSettings()}
+            className="text-[12px] px-2.5 py-1 rounded-md bg-[oklch(0.30_0_0/0.6)] hover:bg-[oklch(0.36_0_0/0.7)] transition"
+          >
+            Open Settings
+          </button>
+        </div>
+      </Shell>
     );
   }
 
-  if (!settings.has_api_key) {
-    return (
-      <div className="h-full flex flex-col items-center justify-center gap-3 px-8 text-center">
-        <div className="text-[oklch(0.96_0_0)] font-medium">
-          Cal.ai isn't configured yet
-        </div>
-        <div className="text-[oklch(0.62_0_0)] text-[12px]">
-          Add your API key in Settings to start composing replies.
-        </div>
+  const showOutput =
+    stream.status !== "idle" || !!stream.text || !!stream.errorMessage;
+
+  return (
+    <Shell shellRef={shellRef}>
+      {/* Input row */}
+      <div
+        data-tauri-drag-region
+        className="flex items-start gap-3 pl-5 pr-4 pt-4 pb-3"
+      >
+        <Indicator
+          streaming={stream.status === "streaming"}
+          color={accent}
+        />
+        <textarea
+          ref={textareaRef}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="Reply to a customer message…"
+          rows={1}
+          spellCheck={false}
+          style={{ caretColor: accent }}
+          className="flex-1 bg-transparent outline-none text-[15px] leading-[1.5] resize-none placeholder:text-[oklch(0.45_0_0)] overflow-auto text-[oklch(0.96_0_0)]"
+        />
+      </div>
+
+      {showOutput && (
+        <>
+          <Divider />
+          <OutputArea
+            text={stream.text}
+            streaming={stream.status === "streaming"}
+            errorMessage={
+              stream.status === "error" ? stream.errorMessage : null
+            }
+            onRetry={handleGenerate}
+            noContext={stream.noContext}
+            accent={accent}
+          />
+          {stream.citations.length > 0 && (
+            <Citations citations={stream.citations} />
+          )}
+        </>
+      )}
+
+      <Divider />
+
+      {/* Footer */}
+      <div className="flex items-center justify-between px-2 py-1.5 text-[11px] text-[oklch(0.62_0_0)] select-none">
         <button
-          onClick={() => void tauri.openSettings()}
-          className="mt-1 px-3 py-1.5 rounded-md bg-[oklch(0.30_0_0)] hover:bg-[oklch(0.36_0_0)] transition text-[12px]"
+          onClick={handleVoiceCycle}
+          disabled={(settings.voices.length ?? 0) < 2}
+          title={
+            settings.voices.length > 1
+              ? "Click to cycle voices"
+              : "Voice (only one configured)"
+          }
+          className="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-[oklch(0.30_0_0/0.5)] disabled:hover:bg-transparent transition"
         >
-          Open Settings
+          <span
+            className="w-1.5 h-1.5 rounded-full"
+            style={{ background: accent }}
+          />
+          <span className="text-[oklch(0.78_0_0)]">
+            {activeVoice
+              ? voiceDisplayName(activeVoice)
+              : settings.selected_voice_key}
+          </span>
         </button>
+
+        <div className="flex items-center gap-1">
+          {canCopy && (
+            <ActionHint
+              label={copyState === "copied" ? "Copied" : "Copy"}
+              kbd={["⌘", "⇧", "C"]}
+              onClick={handleCopy}
+              tone={copyState === "copied" ? "accent" : "default"}
+            />
+          )}
+          <ActionHint
+            label={
+              stream.status === "streaming"
+                ? "Generating…"
+                : stream.status === "done"
+                  ? "Regenerate"
+                  : "Generate"
+            }
+            kbd={["⌘", "↵"]}
+            onClick={handleGenerate}
+            disabled={!canGenerate}
+            tone="primary"
+          />
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+function Shell({
+  children,
+  shellRef,
+}: {
+  children: ReactNode;
+  shellRef?: React.RefObject<HTMLDivElement | null>;
+}) {
+  return (
+    <div
+      ref={shellRef}
+      className="flex flex-col rounded-xl overflow-hidden border border-[oklch(0.96_0_0/0.08)]"
+      style={{
+        background: "oklch(0.16 0 0 / 0.86)",
+        backdropFilter: "blur(28px) saturate(150%)",
+        WebkitBackdropFilter: "blur(28px) saturate(150%)",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Divider() {
+  return (
+    <div className="h-px bg-[oklch(0.96_0_0/0.07)] mx-3 shrink-0" />
+  );
+}
+
+function Indicator({
+  streaming,
+  color,
+}: {
+  streaming: boolean;
+  color: string;
+}) {
+  // Match the textarea's first-line box height (15px font × 1.5 line-height
+  // ≈ 22.5px) so flex centering aligns the dot with the text x-height.
+  return (
+    <div className="shrink-0 h-[22.5px] flex items-center">
+      <span
+        style={{ background: color }}
+        className={`block w-2 h-2 rounded-full ${
+          streaming ? "animate-pulse" : ""
+        }`}
+      />
+    </div>
+  );
+}
+
+function OutputArea({
+  text,
+  streaming,
+  errorMessage,
+  noContext,
+  onRetry,
+  accent,
+}: {
+  text: string;
+  streaming: boolean;
+  errorMessage: string | null;
+  noContext: boolean;
+  onRetry: () => void;
+  accent: string;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll while streaming.
+  useEffect(() => {
+    if (!streaming) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [text, streaming]);
+
+  if (errorMessage) {
+    return (
+      <div className="px-5 py-3">
+        <div className="flex items-start gap-3 text-[13px] leading-relaxed">
+          <span className="text-[oklch(0.66_0.20_30)] flex-1">
+            {errorMessage}
+          </span>
+          <button
+            onClick={onRetry}
+            className="shrink-0 px-2 py-0.5 rounded-md bg-[oklch(0.30_0_0/0.6)] hover:bg-[oklch(0.36_0_0/0.7)] text-[11px] text-[oklch(0.96_0_0)] transition"
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }
 
   return (
     <div
-      className="h-full flex flex-col rounded-xl overflow-hidden border border-[oklch(0.30_0_0/0.5)]"
-      style={{
-        background: "oklch(0.18 0 0 / 0.92)",
-        backdropFilter: "blur(20px)",
-        WebkitBackdropFilter: "blur(20px)",
-      }}
+      ref={scrollRef}
+      className="px-5 py-3 max-h-[300px] overflow-auto whitespace-pre-wrap text-[13px] leading-relaxed text-[oklch(0.92_0_0)]"
     >
-      {/* drag handle / header */}
-      <div
-        data-tauri-drag-region
-        className="flex items-center justify-between px-4 py-2 border-b border-[oklch(0.30_0_0/0.5)] select-none"
-      >
-        <div className="flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-[oklch(0.74_0.16_270)]" />
-          <span className="text-[11px] tracking-wide uppercase text-[oklch(0.62_0_0)]">
-            Cal.ai composer
-          </span>
+      {text || (
+        <span className="text-[oklch(0.45_0_0)]">
+          {streaming ? "" : "Reply will appear here."}
+        </span>
+      )}
+      {streaming && (
+        <span
+          style={{ background: accent }}
+          className="inline-block w-[6px] h-[14px] -mb-[2px] ml-[1px] animate-pulse align-text-bottom"
+        />
+      )}
+      {noContext && !streaming && (
+        <div className="mt-2 text-[11px] text-[oklch(0.55_0_0)]">
+          (no matching docs)
         </div>
-        <button
-          onClick={handleVoiceCycle}
-          title="Click to cycle voices"
-          className="px-2 py-0.5 text-[11px] rounded bg-[oklch(0.22_0_0)] hover:bg-[oklch(0.30_0_0)] text-[oklch(0.96_0_0)] transition"
-        >
-          Voice: {activeVoice?.name ?? settings.selected_voice_key}
-        </button>
-      </div>
-
-      <div className="flex-1 grid grid-rows-2 gap-px bg-[oklch(0.30_0_0/0.5)] overflow-hidden">
-        {/* input */}
-        <div className="bg-[oklch(0.18_0_0)] flex flex-col min-h-0">
-          <div className="px-4 pt-2 text-[10px] uppercase tracking-wide text-[oklch(0.62_0_0)]">
-            Customer message
-          </div>
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Paste or type the customer message…"
-            className="flex-1 px-4 py-2 bg-transparent outline-none text-[13px] leading-relaxed text-[oklch(0.96_0_0)] placeholder:text-[oklch(0.40_0_0)] min-h-0 overflow-auto"
-          />
-          <div className="px-4 py-2 border-t border-[oklch(0.30_0_0/0.5)] flex items-center justify-between text-[11px] text-[oklch(0.62_0_0)]">
-            <span>{input.length} chars</span>
-            <button
-              onClick={handleGenerate}
-              disabled={!canGenerate}
-              className="px-2.5 py-1 rounded-md bg-[oklch(0.74_0.16_270)] text-black disabled:opacity-40 disabled:cursor-not-allowed hover:brightness-110 transition text-[12px] font-medium"
-            >
-              {stream.status === "streaming" ? "Streaming…" : "Generate ⌘↵"}
-            </button>
-          </div>
-        </div>
-
-        {/* output */}
-        <div className="bg-[oklch(0.18_0_0)] flex flex-col min-h-0">
-          <div className="px-4 pt-2 flex items-center justify-between text-[10px] uppercase tracking-wide text-[oklch(0.62_0_0)]">
-            <span>Reply</span>
-            {stream.status === "streaming" && (
-              <span className="flex items-center gap-1.5 text-[oklch(0.74_0.16_270)] normal-case tracking-normal">
-                <span className="w-1.5 h-1.5 rounded-full bg-[oklch(0.74_0.16_270)] animate-pulse" />
-                generating
-              </span>
-            )}
-          </div>
-          <ResponsePane
-            status={stream.status}
-            text={stream.text}
-            errorMessage={stream.errorMessage}
-            onRetry={handleGenerate}
-          />
-
-          {stream.citations.length > 0 && (
-            <div className="px-4 py-2 border-t border-[oklch(0.30_0_0/0.5)] text-[11px] text-[oklch(0.62_0_0)]">
-              <div className="text-[10px] uppercase tracking-wide mb-1">
-                Citations
-              </div>
-              <ul className="space-y-0.5">
-                {stream.citations.map((c, i) => (
-                  <li key={`${c.slug}-${i}`} className="truncate">
-                    <span className="text-[oklch(0.40_0_0)]">{c.slug}</span>
-                    {c.headingPath.length > 0 && (
-                      <span className="text-[oklch(0.78_0_0)]">
-                        {" "}
-                        › {c.headingPath.join(" › ")}
-                      </span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          <div className="px-4 py-2 border-t border-[oklch(0.30_0_0/0.5)] flex items-center justify-between text-[11px]">
-            <span className="text-[oklch(0.62_0_0)]">
-              {stream.status === "done" && stream.noContext
-                ? "No matching docs."
-                : stream.status === "done"
-                  ? "Ready to copy."
-                  : ""}
-            </span>
-            <button
-              onClick={handleCopy}
-              disabled={stream.status !== "done" || !stream.text}
-              className="px-2.5 py-1 rounded-md bg-[oklch(0.30_0_0)] hover:bg-[oklch(0.36_0_0)] disabled:opacity-40 disabled:cursor-not-allowed transition text-[12px]"
-            >
-              {copyState === "copied" ? "Copied ✓" : "Copy ⌘⇧C"}
-            </button>
-          </div>
-        </div>
-      </div>
+      )}
     </div>
   );
 }
 
-function ResponsePane({
-  status,
-  text,
-  errorMessage,
-  onRetry,
+function Citations({
+  citations,
 }: {
-  status: ReturnType<typeof useAskStream>["state"]["status"];
-  text: string;
-  errorMessage: string | null;
-  onRetry: () => void;
+  citations: { slug: string; headingPath: string[] }[];
 }) {
-  if (status === "error") {
-    return (
-      <div className="flex-1 flex flex-col items-start justify-center px-4 py-3 gap-2 min-h-0">
-        <div className="text-[oklch(0.66_0.20_30)] text-[12px]">
-          {errorMessage ?? "Something went wrong."}
-        </div>
-        <button
-          onClick={onRetry}
-          className="px-2.5 py-1 rounded-md bg-[oklch(0.30_0_0)] hover:bg-[oklch(0.36_0_0)] transition text-[12px]"
-        >
-          Retry
-        </button>
-      </div>
-    );
-  }
   return (
-    <div className="flex-1 px-4 py-2 overflow-auto whitespace-pre-wrap text-[13px] leading-relaxed text-[oklch(0.96_0_0)] min-h-0">
-      {text || (
-        <span className="text-[oklch(0.40_0_0)]">
-          {status === "streaming" ? "" : "Reply will appear here."}
-        </span>
-      )}
+    <div className="px-4 pb-2 flex flex-wrap gap-1 text-[10.5px] shrink-0">
+      {citations.map((c, i) => {
+        const path =
+          c.headingPath.length > 0 ? c.headingPath.join(" › ") : null;
+        return (
+          <span
+            key={`${c.slug}-${i}`}
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[oklch(0.96_0_0/0.05)] text-[oklch(0.72_0_0)]"
+            title={path ?? c.slug}
+          >
+            <span className="text-[oklch(0.55_0_0)]">↗</span>
+            <span className="truncate max-w-[180px] font-mono">{c.slug}</span>
+            {path && (
+              <span className="truncate max-w-[200px] text-[oklch(0.62_0_0)]">
+                · {path}
+              </span>
+            )}
+          </span>
+        );
+      })}
     </div>
+  );
+}
+
+function ActionHint({
+  label,
+  kbd,
+  onClick,
+  disabled,
+  tone = "default",
+}: {
+  label: string;
+  kbd: string[];
+  onClick: () => void;
+  disabled?: boolean;
+  tone?: "default" | "primary" | "accent";
+}) {
+  const labelTone =
+    tone === "accent"
+      ? "text-[oklch(0.74_0.16_270)]"
+      : tone === "primary"
+        ? "text-[oklch(0.92_0_0)]"
+        : "text-[oklch(0.78_0_0)]";
+
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={`flex items-center gap-1.5 px-2 py-1 rounded-md disabled:opacity-40 disabled:cursor-not-allowed enabled:hover:bg-[oklch(0.30_0_0/0.5)] transition ${labelTone}`}
+    >
+      <span>{label}</span>
+      <span className="flex items-center gap-0.5">
+        {kbd.map((k, i) => (
+          <Kbd key={i}>{k}</Kbd>
+        ))}
+      </span>
+    </button>
+  );
+}
+
+function Kbd({ children }: { children: ReactNode }) {
+  return (
+    <span className="inline-flex items-center justify-center min-w-[16px] h-[16px] px-[3px] rounded-[4px] bg-[oklch(0.96_0_0/0.08)] text-[10px] text-[oklch(0.85_0_0)] font-medium leading-none">
+      {children}
+    </span>
   );
 }

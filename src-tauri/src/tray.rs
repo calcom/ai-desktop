@@ -1,4 +1,5 @@
 use tauri::{
+    image::Image,
     menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, Runtime,
@@ -12,10 +13,10 @@ const TRAY_ID: &str = "main-tray";
 pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = build_menu(app)?;
 
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .ok_or_else(|| tauri::Error::AssetNotFound("tray icon".into()))?;
+    // Embed the monochrome template icon at compile time. macOS will render
+    // it correctly in both light and dark menu bars because we mark it as
+    // a template image below.
+    let icon = Image::from_bytes(include_bytes!("../icons/tray.png"))?;
 
     let _tray = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
@@ -69,7 +70,14 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu
             };
             for v in &snapshot.voices {
                 let id = format!("voice:{}", v.key);
-                let item = CheckMenuItemBuilder::with_id(id, &v.name)
+                // The canonical voice ships as "Cal.com Help Desk" (or
+                // similar) but reads better in the menu as just "Default".
+                let display = if v.key == "default" {
+                    "Default"
+                } else {
+                    v.name.as_str()
+                };
+                let item = CheckMenuItemBuilder::with_id(id, display)
                     .checked(v.key == selected)
                     .build(app)?;
                 sub = sub.item(&item);
