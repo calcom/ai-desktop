@@ -11,7 +11,7 @@ pub const KEY_BASE_URL: &str = "base_url";
 pub const KEY_SELECTED_VOICE: &str = "selected_voice_key";
 pub const KEY_VOICES_CACHE: &str = "voices_cache";
 
-pub const DEFAULT_BASE_URL: &str = "http://localhost:3000";
+pub const DEFAULT_BASE_URL: &str = "https://api.cal.ai";
 pub const DEFAULT_VOICE_KEY: &str = "default";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

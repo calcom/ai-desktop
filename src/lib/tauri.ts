@@ -25,6 +25,24 @@ export type ValidateResult = {
   missing_scopes: string[];
 };
 
+export type AskStreamCommandArgs = {
+  request_id: string;
+  base_url: string;
+  api_key: string;
+  question: string;
+  voice: string;
+  top_k?: number;
+};
+
+export type AskStreamCommandResult = {
+  text: string;
+  citations: {
+    slug: string;
+    headingPath: string[];
+  }[];
+  no_context: boolean;
+};
+
 export const tauri = {
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (api_key: string, base_url: string) =>
@@ -32,6 +50,8 @@ export const tauri = {
   validateApiKey: (api_key: string, base_url: string) =>
     invoke<ValidateResult>("validate_api_key", { args: { api_key, base_url } }),
   refreshVoices: () => invoke<Voice[]>("refresh_voices"),
+  askStream: (args: AskStreamCommandArgs) =>
+    invoke<AskStreamCommandResult>("ask_stream", { args }),
   setSelectedVoice: (key: string) => invoke<void>("set_selected_voice", { key }),
   openComposer: () => invoke<void>("open_composer"),
   openSettings: () => invoke<void>("open_settings_window"),

@@ -161,6 +161,13 @@ pub struct AskResult {
     pub no_context: bool,
 }
 
+#[derive(Debug, Clone)]
+pub enum AskStreamUpdate {
+    Delta(String),
+    Citations(Vec<Citation>),
+    Error(String),
+}
+
 #[derive(Serialize)]
 struct AskBody<'a> {
     question: &'a str,
@@ -176,8 +183,26 @@ pub async fn ask_collect(
     question: &str,
     voice: &str,
 ) -> Result<AskResult, ApiError> {
+    ask_collect_with_events(base_url, api_key, question, voice, 8, |_| {}).await
+}
+
+pub async fn ask_collect_with_events<F>(
+    base_url: &str,
+    api_key: &str,
+    question: &str,
+    voice: &str,
+    top_k: u32,
+    mut on_event: F,
+) -> Result<AskResult, ApiError>
+where
+    F: FnMut(AskStreamUpdate),
+{
     let url = format!("{}/ask", base_url.trim_end_matches('/'));
-    let body = AskBody { question, voice, top_k: 8 };
+    let body = AskBody {
+        question,
+        voice,
+        top_k,
+    };
     let res = client()?
         .post(&url)
         .bearer_auth(api_key)
@@ -213,26 +238,29 @@ pub async fn ask_collect(
         while let Some(idx) = find_event_boundary(&buffer) {
             let raw = buffer[..idx].to_string();
             // Drop the boundary itself.
-            buffer = buffer[idx..]
-                .trim_start_matches(['\r', '\n'])
-                .to_string();
+            buffer = buffer[idx..].trim_start_matches(['\r', '\n']).to_string();
 
             let (event, data) = parse_sse_event(&raw);
             match event.as_str() {
                 "" | "message" => {
                     result.text.push_str(&data);
+                    on_event(AskStreamUpdate::Delta(data));
                 }
                 "citations" => {
                     if let Ok(parsed) = serde_json::from_str::<Vec<Citation>>(&data) {
+                        on_event(AskStreamUpdate::Citations(parsed.clone()));
                         result.citations = parsed;
                     }
                 }
                 "error" => {
                     #[derive(Deserialize)]
-                    struct E { message: String }
+                    struct E {
+                        message: String,
+                    }
                     let msg = serde_json::from_str::<E>(&data)
                         .map(|e| e.message)
                         .unwrap_or_else(|_| data.clone());
+                    on_event(AskStreamUpdate::Error(msg.clone()));
                     return Err(ApiError {
                         code: "stream_error".to_string(),
                         message: msg,

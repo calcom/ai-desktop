@@ -59,7 +59,7 @@ cal.ai/
 │   │   └── useSettings.ts     # load + reload settings on voice/focus events
 │   └── lib/
 │       ├── tauri.ts           # invoke() typed wrappers
-│       ├── api.ts             # POST /ask SSE consumer (via plugin-http)
+│       ├── api.ts             # POST /ask stream bridge (Rust command events → React)
 │       ├── errors.ts          # error.code → friendly text
 │       ├── wrap.ts            # customer-message → /ask question wrapper (mirror of wrap.rs)
 │       └── voiceTheme.ts      # voiceColor(key) hash; voiceDisplayName(voice)
@@ -86,7 +86,7 @@ cal.ai/
 
 ## Backend dependency
 
-Lives separately at `~/Development/ai/` (Bun + Hono RAG service). **Default base URL: `http://localhost:3000`.** See `~/Development/ai/AGENTS.md` for backend internals; the surface this app uses:
+Production lives at `https://api.cal.ai`. Local development can point at the separate backend repo in `~/Development/ai/` (Bun + Hono RAG service). **Default base URL: `https://api.cal.ai`.** See `~/Development/ai/AGENTS.md` for backend internals; the surface this app uses:
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
@@ -226,10 +226,10 @@ When a window is closed, it's **hidden, not destroyed** — the React tree persi
 | Workflow 2 (composer) | JS (`Composer.tsx` + `useAskStream`) |
 | Persisted settings | Rust owns the canonical view (`state.rs` + `tauri-plugin-store`); JS reads via `get_settings` command |
 | `/me` validation, `/voices` fetch | Rust (`api.rs`) — easier to share between tray and settings |
-| `/ask` SSE for composer | JS (`api.ts`) — needs incremental UI updates |
+| `/ask` SSE for composer | Rust transport/parser (`api.rs` + `ask_stream` command) emits per-request events; JS (`api.ts` + `useAskStream`) updates incrementally |
 | `/ask` SSE for clipboard one-shot | Rust (`api.rs::ask_collect`) — buffered, no UI |
 
-Both SSE parsers are intentionally hand-rolled; no `EventSource` (it doesn't support POST).
+The Rust SSE parser is intentionally hand-rolled; no `EventSource` (it doesn't support POST).
 
 ### Activation policy
 
@@ -239,8 +239,10 @@ Both SSE parsers are intentionally hand-rolled; no `EventSource` (it doesn't sup
 
 ```rust
 .run(|_app, event| {
-    if let tauri::RunEvent::ExitRequested { api, .. } = event {
-        api.prevent_exit();   // last window closing must NOT quit the app
+    if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+        if code.is_none() {
+            api.prevent_exit();   // last window closing must NOT quit the app
+        }
     }
 });
 ```
@@ -252,7 +254,7 @@ Quit flows through the tray menu's "Quit" item → `app.exit(0)`.
 `tauri-plugin-store` writes to `settings.json` in the app config dir. Keys:
 
 - `api_key` (string)
-- `base_url` (string, default `http://localhost:3000`)
+- `base_url` (string, default `https://api.cal.ai`)
 - `selected_voice_key` (string, default `"default"`)
 - `voices_cache` (last successful `/voices` response — small JSON)
 
@@ -291,7 +293,7 @@ For `tauri-plugin-http`, allowed URLs are scoped:
 }
 ```
 
-If the user changes their backend URL to something outside this list, the request will fail with a Tauri permission error (not a network error). Either widen the allowlist or accept localhost-only.
+If a JS feature uses `tauri-plugin-http` and the user changes their backend URL to something outside this list, the request will fail with a Tauri permission error (not a network error). The composer `/ask` stream uses the Rust `ask_stream` command instead, so it follows the same `reqwest` path as the clipboard shortcut.
 
 ### Wrap helper duplication
 
@@ -309,7 +311,7 @@ Surface `error.code` through the friendly mappers, not raw messages. Both error 
 - `forbidden` → "API key is missing the `{required_scope}` scope."
 - `rate_limited` → "Hit the per-minute limit — try again in {retry_after_seconds}s."
 - `voices_not_configured` → "Backend has no voices configured."
-- network/`fetch` errors → "Backend offline at {base_url}."
+- network/request errors → "Backend offline at {base_url}."
 
 Don't log API keys or full clipboard contents in release builds.
 
@@ -323,23 +325,25 @@ Don't log API keys or full clipboard contents in release builds.
 
 4. **`field-sizing: content` is unreliable in WKWebView.** The composer's textarea uses manual JS auto-grow (`el.style.height = "auto"; el.style.height = scrollHeight + "px"`) inside a `useLayoutEffect` so the height is finalized before paint. The shell's ResizeObserver picks up the parent change and resizes the window.
 
-5. **Backend has no CORS.** Fetching from a webview origin (`tauri://localhost` in prod, `http://localhost:1420` in dev) to `http://localhost:3000` is blocked by browser CORS — and a `TypeError` from a CORS preflight is indistinguishable from a real network error. **All `/ask` calls from JS go through `@tauri-apps/plugin-http`**, which routes the request through Rust (reqwest under the hood) and returns a real streaming `Response`. Don't switch to native `fetch` for backend calls.
+5. **Backend has no CORS.** Fetching from a webview origin (`tauri://localhost` in prod, `http://localhost:1420` in dev) to the backend is blocked by browser CORS — and a `TypeError` from a CORS preflight is indistinguishable from a real network error. Composer `/ask` calls invoke the Rust `ask_stream` command, which uses the same `reqwest` SSE parser as the clipboard shortcut and emits deltas/citations back to the webview. Don't switch backend calls to native `fetch`.
 
-6. **NSUserNotification picks up the bundle icon via Launch Services.** When the app is launched straight out of `target/release/bundle/macos/`, Launch Services may not have indexed the bundle and the notification icon falls back to a generic placeholder. Fix: move `Cal.ai.app` to `/Applications`, or run `lsregister -f path/to/Cal.ai.app`. The notification plugin uses the deprecated `NSUserNotification` (via `notify-rust` → `mac-notification-sys`); switching to `UNUserNotification` would fix this upstream but isn't supported by the plugin yet.
+6. **Notification permission is requested on launch via `UNUserNotificationCenter`.** `tauri-plugin-notification` reports desktop permission as granted without surfacing the macOS prompt, so `notification_permission.rs` uses the native UserNotifications framework to ask before the first workflow notification.
 
-7. **Tray icon must be a template image on macOS.** `src-tauri/icons/tray.png` is a 22×22 PNG with pure black + alpha (no color). `TrayIconBuilder::icon_as_template(true)` makes macOS auto-invert it for dark menu bars. The colored `default_window_icon` rendered as a black square in template mode — that's why we embed `tray.png` explicitly via `Image::from_bytes(include_bytes!("../icons/tray.png"))`.
+7. **NSUserNotification picks up the bundle icon via Launch Services.** When the app is launched straight out of `target/release/bundle/macos/`, Launch Services may not have indexed the bundle and the notification icon falls back to a generic placeholder. Fix: move `Cal.ai.app` to `/Applications`, or run `lsregister -f path/to/Cal.ai.app`. The notification plugin still sends notifications through deprecated `NSUserNotification` (via `notify-rust` → `mac-notification-sys`); switching delivery to `UNUserNotification` would fix this upstream but isn't supported by the plugin yet.
 
-8. **Tauri's `tauri icon` CLI overwrites only known icon files.** It regenerates `32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.icns`, `icon.ico`, the Windows tile assets, and the iOS/Android icon sets — but it leaves `tray.png` alone because it's not in its name list. Safe to run repeatedly.
+8. **Tray icon must be a template image on macOS.** `src-tauri/icons/tray.png` is a 22×22 PNG with pure black + alpha (no color). `TrayIconBuilder::icon_as_template(true)` makes macOS auto-invert it for dark menu bars. The colored `default_window_icon` rendered as a black square in template mode — that's why we embed `tray.png` explicitly via `Image::from_bytes(include_bytes!("../icons/tray.png"))`.
 
-9. **Wrapped composer state must be reset on reopen.** Composer + Settings windows are hidden, not destroyed. Rust emits `composer-prefill` (always — payload is the current clipboard) and `settings-opened` (no payload) when re-showing; the React side resets stream state, copy state, and reloads settings/saveState from the store on those events. Without this, you'd see stale "Saved. Closing…" messages or stale stream output.
+9. **Tauri's `tauri icon` CLI overwrites only known icon files.** It regenerates `32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.icns`, `icon.ico`, the Windows tile assets, and the iOS/Android icon sets — but it leaves `tray.png` alone because it's not in its name list. Safe to run repeatedly.
 
-10. **Auto-sized composer math.** ResizeObserver `contentRect.height` excludes border; use `entry.borderBoxSize[0].blockSize` instead, then add a small buffer (+4px) before passing to `setSize` so hi-dpi rounding doesn't shave off the bottom rounded corner. Single-source the resize logic — both the ResizeObserver callback and the `useLayoutEffect` after each render call into the same `applyHeight` (rAF-debounced).
+10. **Wrapped composer state must be reset on reopen.** Composer + Settings windows are hidden, not destroyed. Rust emits `composer-prefill` (always — payload is the current clipboard) and `settings-opened` (no payload) when re-showing; the React side resets stream state, copy state, and reloads settings/saveState from the store on those events. Without this, you'd see stale "Saved. Closing…" messages or stale stream output.
 
-11. **macOS native window shadow follows the alpha mask of transparent windows.** That's why we use `.shadow(true)` + `transparent(true)` and removed the CSS `box-shadow` — the CSS shadow rendered outside the rounded card and got clipped at the window edge. Native shadow traces the rounded corners cleanly.
+11. **Auto-sized composer math.** ResizeObserver `contentRect.height` excludes border; use `entry.borderBoxSize[0].blockSize` instead, then add a small buffer (+4px) before passing to `setSize` so hi-dpi rounding doesn't shave off the bottom rounded corner. Single-source the resize logic — both the ResizeObserver callback and the `useLayoutEffect` after each render call into the same `applyHeight` (rAF-debounced).
+
+12. **macOS native window shadow follows the alpha mask of transparent windows.** That's why we use `.shadow(true)` + `transparent(true)` and removed the CSS `box-shadow` — the CSS shadow rendered outside the rounded card and got clipped at the window edge. Native shadow traces the rounded corners cleanly.
 
 ## Security notes
 
-- API key is currently stored **plaintext** via `tauri-plugin-store`. Settings UI flags this with a TODO. **Migrate to macOS Keychain (`tauri-plugin-stronghold` or a thin `keyring-rs` wrapper) before sharing the app with anyone else.**
+- API key is currently stored **plaintext** via `tauri-plugin-store`. **Migrate to macOS Keychain (`tauri-plugin-stronghold` or a thin `keyring-rs` wrapper) before sharing the app with anyone else.**
 - Don't widen `http:default` `allow` URL list to `http://**` without thinking — that lets any compromised webview content hit any HTTP server.
 - `tauri.conf.json` `app.security.csp` is currently `null`. For a release build with remote content, set a real CSP.
 

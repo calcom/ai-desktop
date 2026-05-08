@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
 
-use crate::api;
+use crate::api::{self, AskStreamUpdate};
 use crate::state::{
     save_selected_voice, save_settings as persist_settings, save_voices, AppState, Voice,
     DEFAULT_BASE_URL, DEFAULT_VOICE_KEY,
@@ -34,7 +36,11 @@ pub fn get_settings<R: Runtime>(app: AppHandle<R>) -> Settings {
             inner.selected_voice_key.clone()
         },
         voices: inner.voices.clone(),
-        has_api_key: inner.api_key.as_deref().map(|s| !s.is_empty()).unwrap_or(false),
+        has_api_key: inner
+            .api_key
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
     }
 }
 
@@ -121,6 +127,100 @@ pub async fn refresh_voices<R: Runtime>(app: AppHandle<R>) -> Result<Vec<Voice>,
     }
 }
 
+#[derive(Deserialize)]
+pub struct AskStreamArgs {
+    pub request_id: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub question: String,
+    pub voice: String,
+    pub top_k: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct AskStreamResult {
+    text: String,
+    citations: Vec<api::Citation>,
+    no_context: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct AskStreamPayload {
+    request_id: String,
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    text: Option<String>,
+    citations: Option<Vec<api::Citation>>,
+    message: Option<String>,
+}
+
+impl AskStreamPayload {
+    fn delta(request_id: &str, text: String) -> Self {
+        Self {
+            request_id: request_id.to_string(),
+            event_type: "delta",
+            text: Some(text),
+            citations: None,
+            message: None,
+        }
+    }
+
+    fn citations(request_id: &str, citations: Vec<api::Citation>) -> Self {
+        Self {
+            request_id: request_id.to_string(),
+            event_type: "citations",
+            text: None,
+            citations: Some(citations),
+            message: None,
+        }
+    }
+
+    fn error(request_id: &str, message: String) -> Self {
+        Self {
+            request_id: request_id.to_string(),
+            event_type: "error",
+            text: None,
+            citations: None,
+            message: Some(message),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn ask_stream<R: Runtime>(
+    window: WebviewWindow<R>,
+    args: AskStreamArgs,
+) -> Result<AskStreamResult, api::ApiError> {
+    let event_window = window.clone();
+    let event_request_id = args.request_id.clone();
+    let result = api::ask_collect_with_events(
+        &args.base_url,
+        &args.api_key,
+        &args.question,
+        &args.voice,
+        args.top_k.unwrap_or(8),
+        move |event| {
+            let payload = match event {
+                AskStreamUpdate::Delta(text) => AskStreamPayload::delta(&event_request_id, text),
+                AskStreamUpdate::Citations(citations) => {
+                    AskStreamPayload::citations(&event_request_id, citations)
+                }
+                AskStreamUpdate::Error(message) => {
+                    AskStreamPayload::error(&event_request_id, message)
+                }
+            };
+            let _ = event_window.emit("ask-stream", payload);
+        },
+    )
+    .await?;
+
+    Ok(AskStreamResult {
+        text: result.text,
+        citations: result.citations,
+        no_context: result.no_context,
+    })
+}
+
 #[tauri::command]
 pub fn set_selected_voice<R: Runtime>(app: AppHandle<R>, key: String) -> Result<(), String> {
     save_selected_voice(&app, &key)?;
@@ -168,7 +268,10 @@ pub enum WindowKind {
     Settings,
 }
 
-pub fn show_or_create_window<R: Runtime>(app: &AppHandle<R>, kind: WindowKind) -> Result<(), String> {
+pub fn show_or_create_window<R: Runtime>(
+    app: &AppHandle<R>,
+    kind: WindowKind,
+) -> Result<(), String> {
     let label = match kind {
         WindowKind::Composer => "composer",
         WindowKind::Settings => "settings",

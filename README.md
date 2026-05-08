@@ -2,7 +2,7 @@
 
 A small macOS menu-bar app that turns customer messages on your clipboard into doc-grounded replies, without leaving Slack or Gmail.
 
-It's a thin desktop client over a separate RAG backend (Bun + Hono) that does the actual retrieval and generation against the Cal.com Help Desk docs. This repo is the **client only** — the backend lives at `~/Development/ai/`.
+It's a thin desktop client over a RAG backend that does the actual retrieval and generation against the Cal.com Help Desk docs. This repo is the **client only** — production uses `https://api.cal.ai`, and the local backend lives at `~/Development/ai/`.
 
 ## What it does
 
@@ -36,11 +36,11 @@ A monochrome glyph in the menu bar exposes:
 
 ## First run
 
-You need the RAG backend running. See `~/Development/ai/README.md` for that. Default base URL is `http://localhost:3000`.
+Default base URL is `https://api.cal.ai`. For local development, run the backend from `~/Development/ai/` and point settings at your local URL.
 
 On first launch with no API key configured, Cal.ai opens its Settings window and blocks until you fill it in:
 
-- **Backend base URL** (default `http://localhost:3000`)
+- **Backend base URL** (default `https://api.cal.ai`)
 - **API key** — issued by the backend (`bun run keys:create -- --name "Cal.ai" --scopes ask,voices:read --rate-limit 60` over there)
 
 The key is validated against `GET /me` before it's saved. If the backend is unreachable or the key is invalid / missing required scopes, you'll see an inline error and saving is blocked.
@@ -54,7 +54,7 @@ After building (see below), drag `Cal.ai.app` to **`/Applications`**. This matte
   -f path/to/Cal.ai.app
 ```
 
-The first time you press `⌘⌥R` or `⌘⇧R`, macOS will prompt for **Accessibility permission** (System Settings → Privacy & Security). The first system notification will prompt for **Notifications permission**. Both are required.
+The first time you press `⌘⌥R` or `⌘⇧R`, macOS will prompt for **Accessibility permission** (System Settings → Privacy & Security). Cal.ai requests **Notifications permission** on launch so workflow status notifications are ready before you use the shortcuts. Both are required.
 
 ## Stack
 
@@ -110,7 +110,7 @@ If a global shortcut collides with another app, you'll see a notification on lau
 
 ## Architecture (one-paragraph version)
 
-`tauri.conf.json` declares no startup windows; the menu-bar tray is the only persistent UI. The composer and settings windows are created lazily by Rust commands and routed in React by window label. Workflow 1 (clipboard one-shot) runs **entirely in Rust** — no window involved — using `reqwest` for the SSE stream and Tauri's clipboard + notification plugins for I/O. Workflow 2 (composer) runs in a webview and routes its `/ask` SSE through `@tauri-apps/plugin-http` (the backend has no CORS, so direct webview `fetch` would be blocked). Settings and the voice list are stored canonically by Rust in `tauri-plugin-store` and mirrored in an in-memory `AppState` for fast tray reads.
+`tauri.conf.json` declares no startup windows; the menu-bar tray is the only persistent UI. The composer and settings windows are created lazily by Rust commands and routed in React by window label. Workflow 1 (clipboard one-shot) runs **entirely in Rust** — no window involved — using `reqwest` for the SSE stream and Tauri's clipboard + notification plugins for I/O. Workflow 2 (composer) runs in a webview and routes its `/ask` SSE through a Rust command that emits stream events back to React. Settings and the voice list are stored canonically by Rust in `tauri-plugin-store` and mirrored in an in-memory `AppState` for fast tray reads.
 
 For the full picture — module-by-module rundown, conventions for adding commands and permissions, and the list of macOS-specific gotchas we hit while building this — read [`AGENTS.md`](./AGENTS.md).
 

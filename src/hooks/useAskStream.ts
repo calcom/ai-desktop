@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { askStream, type Citation } from "../lib/api";
-import { BackendErrorException, friendlyError } from "../lib/errors";
+import { backendErrorExceptionFromUnknown } from "../lib/errors";
 
 export type StreamStatus = "idle" | "streaming" | "done" | "error";
 
@@ -79,20 +79,8 @@ export function useAskStream() {
         }));
       } catch (e) {
         if (controller.signal.aborted) return;
-        const msg =
-          e instanceof BackendErrorException
-            ? e.asFriendly(params.baseUrl)
-            : e instanceof Error
-              ? e.message
-              : "Unknown error";
-        // Network errors come through fetch — translate as "backend offline".
         const finalMsg =
-          e instanceof TypeError
-            ? friendlyError(
-                { code: "network", message: msg },
-                params.baseUrl,
-              )
-            : msg;
+          backendErrorExceptionFromUnknown(e).asFriendly(params.baseUrl);
         setState((prev) => ({
           ...prev,
           status: "error",

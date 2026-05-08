@@ -7,6 +7,7 @@ use tauri::{
 
 use crate::commands::{show_or_create_window, WindowKind};
 use crate::state::{AppState, DEFAULT_VOICE_KEY};
+use crate::workflow::run_clipboard_oneshot;
 
 const TRAY_ID: &str = "main-tray";
 
@@ -93,6 +94,10 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu
         .item(
             &MenuItemBuilder::with_id("open_composer", "Open composer  ⇧⌘R").build(app)?,
         )
+        .item(
+            &MenuItemBuilder::with_id("clipboard_reply", "Reply from clipboard  ⌥⌘R")
+                .build(app)?,
+        )
         .separator()
         .item(&voices_submenu)
         .separator()
@@ -119,6 +124,12 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu
 
 fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     match id {
+        "clipboard_reply" => {
+            let app_handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                run_clipboard_oneshot(app_handle).await;
+            });
+        }
         "open_composer" => {
             let _ = show_or_create_window(app, WindowKind::Composer);
         }

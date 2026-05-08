@@ -1,5 +1,6 @@
 mod api;
 mod commands;
+mod notification_permission;
 mod shortcuts;
 mod state;
 mod tray;
@@ -33,6 +34,7 @@ pub fn run() {
             commands::save_settings,
             commands::validate_api_key,
             commands::refresh_voices,
+            commands::ask_stream,
             commands::set_selected_voice,
             commands::open_composer,
             commands::open_settings_window,
@@ -44,6 +46,11 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Ask for notification access up front so the first workflow
+            // notification can carry useful status instead of triggering the
+            // system permission prompt mid-flow.
+            notification_permission::request_on_launch();
 
             // Initialize app state from persisted store.
             let app_state = AppState::load(app.handle());
@@ -85,9 +92,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
                 // Don't quit when the last window closes; the tray stays alive.
-                api.prevent_exit();
+                if code.is_none() {
+                    api.prevent_exit();
+                }
             }
         });
 }

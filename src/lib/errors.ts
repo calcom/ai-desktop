@@ -22,6 +22,8 @@ export function friendlyError(err: BackendError, baseUrl: string): string {
       return "Selected voice doesn't exist on the backend.";
     case "network":
       return `Backend offline at ${baseUrl}.`;
+    case "request_cancelled":
+      return "Request cancelled.";
     default:
       return err.message || "Something went wrong.";
   }
@@ -49,5 +51,69 @@ export class BackendErrorException extends Error {
       },
       baseUrl,
     );
+  }
+}
+
+export function backendErrorExceptionFromUnknown(
+  value: unknown,
+): BackendErrorException {
+  if (value instanceof BackendErrorException) return value;
+  return new BackendErrorException(backendErrorFromUnknown(value));
+}
+
+function backendErrorFromUnknown(value: unknown): BackendError {
+  if (value instanceof Error) {
+    return {
+      code:
+        value.message === "Request cancelled" ? "request_cancelled" : "unknown",
+      message: value.message || "Something went wrong.",
+    };
+  }
+
+  if (typeof value === "string") {
+    return {
+      code: value === "Request cancelled" ? "request_cancelled" : "unknown",
+      message: value || "Something went wrong.",
+    };
+  }
+
+  const record = asRecord(value);
+  if (!record) {
+    return { code: "unknown", message: "Something went wrong." };
+  }
+
+  const nested = asRecord(record.error);
+  const source = nested ?? record;
+  const code = typeof source.code === "string" ? source.code : "unknown";
+  const message =
+    typeof source.message === "string"
+      ? source.message
+      : safeStringify(source) ?? "Something went wrong.";
+
+  return {
+    code,
+    message,
+    required_scope:
+      typeof source.required_scope === "string"
+        ? source.required_scope
+        : undefined,
+    retry_after_seconds:
+      typeof source.retry_after_seconds === "number"
+        ? source.retry_after_seconds
+        : undefined,
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function safeStringify(value: unknown): string | null {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return null;
   }
 }

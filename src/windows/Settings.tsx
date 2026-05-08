@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { tauri, type ValidateResult } from "../lib/tauri";
 
+const DEFAULT_BASE_URL = "https://api.cal.ai";
+
 type SaveState =
   | { status: "idle" }
   | { status: "validating" }
@@ -11,14 +13,14 @@ type SaveState =
 
 export function Settings() {
   const [apiKey, setApiKey] = useState("");
-  const [baseUrl, setBaseUrl] = useState("http://localhost:3000");
+  const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URL);
   const [saveState, setSaveState] = useState<SaveState>({ status: "idle" });
   const [hasExisting, setHasExisting] = useState(false);
 
   const reload = useCallback(async () => {
     const s = await tauri.getSettings();
     setApiKey(s.api_key ?? "");
-    setBaseUrl(s.base_url || "http://localhost:3000");
+    setBaseUrl(s.base_url || DEFAULT_BASE_URL);
     setHasExisting(s.has_api_key);
     setSaveState({ status: "idle" });
   }, []);
@@ -94,23 +96,17 @@ export function Settings() {
         onSubmit={validateAndSave}
         className="flex-1 px-6 py-5 flex flex-col gap-4"
       >
-        <Field
-          label="Backend base URL"
-          hint="The Bun + Hono RAG service. Default: http://localhost:3000"
-        >
+        <Field label="Backend base URL">
           <input
             type="url"
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="http://localhost:3000"
+            placeholder={DEFAULT_BASE_URL}
             className="w-full px-3 py-2 rounded-md bg-[oklch(0.22_0_0)] border border-[oklch(0.30_0_0)] outline-none focus:border-[oklch(0.74_0.16_270)] transition text-[13px]"
           />
         </Field>
 
-        <Field
-          label="API key"
-          hint="Stored as plaintext in tauri-plugin-store today (TODO: migrate to Keychain)."
-        >
+        <Field label="API key">
           <input
             type="password"
             value={apiKey}
@@ -164,11 +160,9 @@ export function Settings() {
 
 function Field({
   label,
-  hint,
   children,
 }: {
   label: string;
-  hint?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -177,9 +171,6 @@ function Field({
         {label}
       </span>
       {children}
-      {hint && (
-        <span className="text-[11px] text-[oklch(0.62_0_0)]">{hint}</span>
-      )}
     </label>
   );
 }
