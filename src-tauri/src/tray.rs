@@ -89,7 +89,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu
         sub.build()?
     };
 
-    let menu = MenuBuilder::new(app)
+    let mut builder = MenuBuilder::new(app)
         .item(
             &MenuItemBuilder::with_id("open_composer", "Open composer  ⇧⌘R").build(app)?,
         )
@@ -97,6 +97,19 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu
         .item(&voices_submenu)
         .separator()
         .item(&MenuItemBuilder::with_id("settings", "Settings…").build(app)?)
+        .item(&MenuItemBuilder::with_id("check_for_updates", "Check for Updates…").build(app)?);
+
+    if let Some(version) = snapshot.pending_update_version.as_deref() {
+        builder = builder.item(
+            &MenuItemBuilder::with_id(
+                "restart_to_apply_update",
+                format!("Restart to install v{version}"),
+            )
+            .build(app)?,
+        );
+    }
+
+    let menu = builder
         .separator()
         .item(&MenuItemBuilder::with_id("quit", "Quit Cal.ai").build(app)?)
         .build()?;
@@ -111,6 +124,15 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
         }
         "settings" => {
             let _ = show_or_create_window(app, WindowKind::Settings);
+        }
+        "check_for_updates" => {
+            let app_handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = crate::updater::check_now(app_handle).await;
+            });
+        }
+        "restart_to_apply_update" => {
+            app.restart();
         }
         "quit" => {
             app.exit(0);

@@ -152,6 +152,16 @@ pub fn quit_app<R: Runtime>(app: AppHandle<R>) {
     app.exit(0);
 }
 
+#[tauri::command]
+pub async fn check_for_updates<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    crate::updater::check_now(app).await
+}
+
+#[tauri::command]
+pub fn restart_to_apply_update<R: Runtime>(app: AppHandle<R>) {
+    app.restart();
+}
+
 #[derive(Clone, Copy)]
 pub enum WindowKind {
     Composer,

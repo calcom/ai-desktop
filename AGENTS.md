@@ -33,6 +33,7 @@ Both Rust and JS sides are listed; versions track v2.
 | System notifications | `tauri-plugin-notification` | `@tauri-apps/plugin-notification` |
 | HTTP from JS bypassing CORS | `tauri-plugin-http` | `@tauri-apps/plugin-http` |
 | Open URLs (default scaffold) | `tauri-plugin-opener` | `@tauri-apps/plugin-opener` |
+| Auto-updater | `tauri-plugin-updater` | — (Rust-only flow) |
 
 Tray uses Tauri's built-in tray API (`tauri-plugin-*` not needed) with the `tray-icon` cargo feature on the `tauri` crate.
 
@@ -78,6 +79,7 @@ cal.ai/
 │       ├── commands.rs        # #[tauri::command] handlers callable from JS
 │       ├── tray.rs            # menu-bar icon + dynamic voice submenu
 │       ├── shortcuts.rs       # global hotkey registration + dispatch
+│       ├── updater.rs         # background + manual update check, install, notify
 │       └── wrap.rs            # mirror of src/lib/wrap.ts
 └── dist/                      # vite build output (gitignored)
 ```
@@ -139,6 +141,67 @@ cargo clippy --no-deps       # lints
 Build target is `app` only (no DMG). Change `bundle.targets` in `tauri.conf.json` if you want a DMG.
 
 After regenerating bundle icons (`bun run tauri icon path/to/source.png`), re-run `tauri build` — the `.icns` and PNG variants change and need a fresh build.
+
+## Releasing & auto-updates
+
+Releases happen via GitHub Actions. The flow is: bump version → tag → push tag → CI builds, signs, notarizes, uploads to a draft GitHub Release → publish the draft → existing installs auto-update on next launch.
+
+### Cutting a release
+
+```sh
+# 1. Bump version in BOTH places (must match):
+#    - package.json
+#    - src-tauri/tauri.conf.json
+#    - src-tauri/Cargo.toml
+# 2. Commit, tag, push:
+git commit -am "chore: release v0.2.0"
+git tag v0.2.0
+git push origin main --tags
+# 3. Watch the workflow:
+gh run watch
+# 4. Once green, the draft release at github.com/<repo>/releases needs
+#    publishing manually. Publishing is what makes auto-update see it.
+```
+
+`tauri-action` writes `latest.json` (the update manifest), `Cal.ai_<version>_universal.app.tar.gz`, and the `.sig` signature into the release. The updater fetches `releases/latest/download/latest.json`, which only resolves to *published* (non-draft, non-prerelease) releases — so drafts are safe.
+
+### Required GitHub repo secrets
+
+Set under Settings → Secrets and variables → Actions:
+
+| Secret | What it is |
+|---|---|
+| `APPLE_CERTIFICATE` | base64 of the Developer ID Application `.p12` (`base64 -i cert.p12 \| pbcopy`) |
+| `APPLE_CERTIFICATE_PASSWORD` | password set when exporting the `.p12` |
+| `APPLE_SIGNING_IDENTITY` | full identity string, e.g. `Developer ID Application: Your Name (ABC1234DEF)` |
+| `APPLE_ID` | Apple ID email for the developer account |
+| `APPLE_PASSWORD` | app-specific password (account.apple.com → Sign-In and Security → App-Specific Passwords) |
+| `APPLE_TEAM_ID` | 10-char team ID from developer.apple.com → Membership |
+| `TAURI_SIGNING_PRIVATE_KEY` | contents of `~/.tauri/cal-ai-updater.key` (generated via `bun tauri signer generate`) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | password for that key (empty string if none) |
+
+### How auto-updates work in the app
+
+- `tauri-plugin-updater` is registered in `lib.rs`. Public key + endpoint URL live in `tauri.conf.json` under `plugins.updater`.
+- On launch, `updater::check_on_launch` runs in a Tokio task, silently fetches `latest.json`, and if a newer signed bundle exists, downloads + stages it. A notification fires; the tray menu sprouts a "Restart to install vX.Y.Z" item.
+- The "Check for Updates…" tray item runs the same flow but always notifies (e.g. "You're on the latest version.").
+- Restarting calls `app.restart()` from Rust (built into `AppHandle`); the new bundle takes effect.
+
+### Two signing systems, don't confuse them
+
+This app has two independent signing keys, used at different layers:
+
+1. **Apple Developer ID Application certificate** signs the `.app` bundle so macOS Gatekeeper accepts it (`codesign` + Apple's notary service). Lives in your Apple Developer account.
+2. **Tauri updater keypair** signs the `.tar.gz` update artifact so the running app can verify a downloaded update wasn't tampered with. Generated locally via `bun tauri signer generate`. Public key in `tauri.conf.json`, private key only in CI secrets.
+
+Both are required: skipping (1) means the .app won't launch on other Macs; skipping (2) means the updater plugin will refuse to install the downloaded bundle.
+
+### Gotchas specific to releases
+
+- **Version must be bumped in three files.** `package.json`, `tauri.conf.json`, and `Cargo.toml` all have a version. They don't have to match each other strictly, but the one tauri-action substitutes into the release name + manifest is `tauri.conf.json`'s. Keep them in sync to avoid confusion.
+- **Endpoint URL is public.** `plugins.updater.endpoints[0]` in `tauri.conf.json` points at `github.com/OWNER/REPO/releases/latest/download/latest.json` — both OWNER and REPO are baked into every released binary, so a repo rename means a forced update through the old URL first.
+- **The first release after configuring the updater can't itself update.** Existing installs need to already include the updater plugin to receive updates — so the v0.1.0 you ship by hand to early users won't auto-update to v0.1.1; v0.1.1 → v0.1.2 will.
+- **`releases/latest` ignores drafts and prereleases.** That's deliberate — keeping a release as a draft until you're ready means the updater won't roll out half-tested builds. Don't switch `releaseDraft: false` in the workflow without a good reason.
 
 ## Architecture
 

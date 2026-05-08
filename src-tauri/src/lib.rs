@@ -3,6 +3,7 @@ mod commands;
 mod shortcuts;
 mod state;
 mod tray;
+mod updater;
 mod workflow;
 mod wrap;
 
@@ -19,6 +20,7 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -36,6 +38,8 @@ pub fn run() {
             commands::open_settings_window,
             commands::close_window,
             commands::quit_app,
+            commands::check_for_updates,
+            commands::restart_to_apply_update,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -68,6 +72,13 @@ pub fn run() {
                     let _ = commands::refresh_voices(handle).await;
                 });
             }
+
+            // Background check for app updates. Silent on success/no-update;
+            // notifies + adds a tray menu item if a new version was staged.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                updater::check_on_launch(handle).await;
+            });
 
             Ok(())
         })

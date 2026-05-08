@@ -32,6 +32,9 @@ pub struct AppStateInner {
     pub base_url: String,
     pub selected_voice_key: String,
     pub voices: Vec<Voice>,
+    /// Set after the updater stages a new bundle. Tray reads this to show
+    /// "Restart to install vX.Y.Z". Cleared on restart.
+    pub pending_update_version: Option<String>,
 }
 
 impl AppState {
@@ -45,6 +48,7 @@ impl AppState {
                         base_url: DEFAULT_BASE_URL.to_string(),
                         selected_voice_key: DEFAULT_VOICE_KEY.to_string(),
                         voices: Vec::new(),
+                        pending_update_version: None,
                     }),
                 };
             }
@@ -78,6 +82,7 @@ impl AppState {
                 base_url,
                 selected_voice_key,
                 voices,
+                pending_update_version: None,
             }),
         }
     }
