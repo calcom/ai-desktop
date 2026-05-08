@@ -1,0 +1,125 @@
+use tauri::{
+    menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, Runtime,
+};
+
+use crate::commands::{show_or_create_window, WindowKind};
+use crate::state::{AppState, DEFAULT_VOICE_KEY};
+
+const TRAY_ID: &str = "main-tray";
+
+pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    let menu = build_menu(app)?;
+
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| tauri::Error::AssetNotFound("tray icon".into()))?;
+
+    let _tray = TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&menu)
+        .icon(icon)
+        .icon_as_template(true)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let _ = tray.app_handle();
+            }
+        })
+        .build(app)?;
+
+    Ok(())
+}
+
+pub fn rebuild_tray_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let tray = app
+        .tray_by_id(TRAY_ID)
+        .ok_or_else(|| "tray not found".to_string())?;
+    let menu = build_menu(app).map_err(|e| e.to_string())?;
+    tray.set_menu(Some(menu)).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+    let snapshot = {
+        let state = app.state::<AppState>();
+        state.snapshot()
+    };
+
+    let voices_submenu = {
+        let mut sub = SubmenuBuilder::new(app, "Voice");
+        if snapshot.voices.is_empty() {
+            sub = sub.item(
+                &MenuItemBuilder::with_id("voice_none", "(No voices loaded)")
+                    .enabled(false)
+                    .build(app)?,
+            );
+        } else {
+            let selected = if snapshot.selected_voice_key.is_empty() {
+                DEFAULT_VOICE_KEY.to_string()
+            } else {
+                snapshot.selected_voice_key.clone()
+            };
+            for v in &snapshot.voices {
+                let id = format!("voice:{}", v.key);
+                let item = CheckMenuItemBuilder::with_id(id, &v.name)
+                    .checked(v.key == selected)
+                    .build(app)?;
+                sub = sub.item(&item);
+            }
+            sub = sub.separator().item(
+                &MenuItemBuilder::with_id("refresh_voices", "Refresh voices").build(app)?,
+            );
+        }
+        sub.build()?
+    };
+
+    let menu = MenuBuilder::new(app)
+        .item(
+            &MenuItemBuilder::with_id("open_composer", "Open composer  ⇧⌘R").build(app)?,
+        )
+        .separator()
+        .item(&voices_submenu)
+        .separator()
+        .item(&MenuItemBuilder::with_id("settings", "Settings…").build(app)?)
+        .separator()
+        .item(&MenuItemBuilder::with_id("quit", "Quit Cal.ai").build(app)?)
+        .build()?;
+
+    Ok(menu)
+}
+
+fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
+    match id {
+        "open_composer" => {
+            let _ = show_or_create_window(app, WindowKind::Composer);
+        }
+        "settings" => {
+            let _ = show_or_create_window(app, WindowKind::Settings);
+        }
+        "quit" => {
+            app.exit(0);
+        }
+        "refresh_voices" => {
+            let app_handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = crate::commands::refresh_voices(app_handle).await;
+            });
+        }
+        other if other.starts_with("voice:") => {
+            let key = other.trim_start_matches("voice:").to_string();
+            let app_handle = app.clone();
+            let _ = crate::state::save_selected_voice(&app_handle, &key);
+            let _ = rebuild_tray_menu(&app_handle);
+            let _ = app_handle.emit("voice-changed", &key);
+        }
+        _ => {}
+    }
+}
