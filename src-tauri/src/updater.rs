@@ -1,7 +1,7 @@
 use tauri::{AppHandle, Manager, Runtime};
-use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
 
+use crate::notifications;
 use crate::state::AppState;
 use crate::tray;
 
@@ -31,12 +31,7 @@ async fn run_check<R: Runtime>(
     let updater = app.updater()?;
     let Some(update) = updater.check().await? else {
         if notify_no_update {
-            let _ = app
-                .notification()
-                .builder()
-                .title("Cal.ai")
-                .body("You're on the latest version.")
-                .show();
+            notifications::send("Cal.ai", "You're on the latest version.");
         }
         return Ok(());
     };
@@ -53,12 +48,10 @@ async fn run_check<R: Runtime>(
     }
     let _ = tray::rebuild_tray_menu(app);
 
-    let _ = app
-        .notification()
-        .builder()
-        .title(format!("Cal.ai {version} ready"))
-        .body("Restart from the menu bar to install.")
-        .show();
+    notifications::send(
+        &format!("Cal.ai {version} ready"),
+        "Restart from the menu bar to install.",
+    );
 
     Ok(())
 }

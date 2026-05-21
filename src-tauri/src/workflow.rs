@@ -1,20 +1,15 @@
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_notification::NotificationExt;
 
 use crate::api::{ask_collect, ApiError};
+use crate::notifications;
 use crate::state::AppState;
 use crate::wrap::wrap_customer_message;
 
 const APP_TITLE: &str = "Cal.ai";
 
-pub fn notify<R: Runtime>(app: &AppHandle<R>, title: &str, body: &str) {
-    let _ = app
-        .notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show();
+pub fn notify(title: &str, body: &str) {
+    notifications::send(title, body);
 }
 
 pub async fn run_clipboard_oneshot<R: Runtime>(app: AppHandle<R>) {
@@ -22,12 +17,12 @@ pub async fn run_clipboard_oneshot<R: Runtime>(app: AppHandle<R>) {
     let clipboard_text = match app.clipboard().read_text() {
         Ok(t) => t,
         Err(_) => {
-            notify(&app, APP_TITLE, "Nothing to respond to (no text on clipboard).");
+            notify(APP_TITLE, "Nothing to respond to (no text on clipboard).");
             return;
         }
     };
     if clipboard_text.trim().is_empty() {
-        notify(&app, APP_TITLE, "Nothing to respond to (clipboard is empty).");
+        notify(APP_TITLE, "Nothing to respond to (clipboard is empty).");
         return;
     }
 
@@ -38,7 +33,7 @@ pub async fn run_clipboard_oneshot<R: Runtime>(app: AppHandle<R>) {
     };
 
     let Some(api_key) = snapshot.api_key else {
-        notify(&app, APP_TITLE, "API key missing — open Settings to configure.");
+        notify(APP_TITLE, "API key missing — open Settings to configure.");
         return;
     };
 
@@ -46,7 +41,7 @@ pub async fn run_clipboard_oneshot<R: Runtime>(app: AppHandle<R>) {
 
     // Let the user know we're on it. The full round-trip is ~2s, so this
     // both confirms the hotkey fired and bridges the wait.
-    notify(&app, APP_TITLE, "Composing a reply…");
+    notify(APP_TITLE, "Composing a reply…");
 
     // 3. Stream + buffer.
     let result = ask_collect(
@@ -65,29 +60,28 @@ pub async fn run_clipboard_oneshot<R: Runtime>(app: AppHandle<R>) {
                 .write_text(reply.text.clone())
                 .is_err()
             {
-                notify(&app, APP_TITLE, "Could not write to clipboard.");
+                notify(APP_TITLE, "Could not write to clipboard.");
                 return;
             }
             notify(
-                &app,
                 APP_TITLE,
                 "No matching docs — wrote fallback to clipboard.",
             );
         }
         Ok(reply) => {
             if app.clipboard().write_text(reply.text).is_err() {
-                notify(&app, APP_TITLE, "Could not write to clipboard.");
+                notify(APP_TITLE, "Could not write to clipboard.");
                 return;
             }
-            notify(&app, APP_TITLE, "Reply ready — paste into Slack/Gmail.");
+            notify(APP_TITLE, "Reply ready — paste into Slack/Gmail.");
         }
         Err(err) => {
-            handle_error(&app, &snapshot.base_url, err);
+            handle_error(&snapshot.base_url, err);
         }
     }
 }
 
-fn handle_error<R: Runtime>(app: &AppHandle<R>, base_url: &str, err: ApiError) {
+fn handle_error(base_url: &str, err: ApiError) {
     let msg = err.user_message(base_url);
-    notify(app, APP_TITLE, &msg);
+    notify(APP_TITLE, &msg);
 }

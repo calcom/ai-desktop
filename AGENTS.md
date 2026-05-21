@@ -327,9 +327,9 @@ Don't log API keys or full clipboard contents in release builds.
 
 5. **Backend has no CORS.** Fetching from a webview origin (`tauri://localhost` in prod, `http://localhost:1420` in dev) to the backend is blocked by browser CORS — and a `TypeError` from a CORS preflight is indistinguishable from a real network error. Composer `/ask` calls invoke the Rust `ask_stream` command, which uses the same `reqwest` SSE parser as the clipboard shortcut and emits deltas/citations back to the webview. Don't switch backend calls to native `fetch`.
 
-6. **Notification permission is requested on launch via `UNUserNotificationCenter`.** `tauri-plugin-notification` reports desktop permission as granted without surfacing the macOS prompt, so `notification_permission.rs` uses the native UserNotifications framework to ask before the first workflow notification.
+6. **Notifications go through `UNUserNotificationCenter` directly, not `tauri-plugin-notification`.** The plugin both checks permission and delivers via the deprecated `NSUserNotification` API (through `notify-rust` → `mac-notification-sys`), which macOS Big Sur+ silently drops even when the bundle has notification permission. `src-tauri/src/notifications.rs` uses `objc2-user-notifications` to request authorization on launch and to schedule each notification via `UNUserNotificationCenter::addNotificationRequest`. The plugin is still registered (in case JS ever needs it) but no Rust code calls it.
 
-7. **NSUserNotification picks up the bundle icon via Launch Services.** When the app is launched straight out of `target/release/bundle/macos/`, Launch Services may not have indexed the bundle and the notification icon falls back to a generic placeholder. Fix: move `Cal.ai.app` to `/Applications`, or run `lsregister -f path/to/Cal.ai.app`. The notification plugin still sends notifications through deprecated `NSUserNotification` (via `notify-rust` → `mac-notification-sys`); switching delivery to `UNUserNotification` would fix this upstream but isn't supported by the plugin yet.
+7. **NSUserNotification picks up the bundle icon via Launch Services.** When the app is launched straight out of `target/release/bundle/macos/`, Launch Services may not have indexed the bundle and the notification icon falls back to a generic placeholder. Fix: move `Cal.ai.app` to `/Applications`, or run `lsregister -f path/to/Cal.ai.app`. (Less load-bearing now that delivery goes through `UNUserNotification`, but the icon-lookup behavior is the same for both APIs.)
 
 8. **Tray icon must be a template image on macOS.** `src-tauri/icons/tray.png` is a 22×22 PNG with pure black + alpha (no color). `TrayIconBuilder::icon_as_template(true)` makes macOS auto-invert it for dark menu bars. The colored `default_window_icon` rendered as a black square in template mode — that's why we embed `tray.png` explicitly via `Image::from_bytes(include_bytes!("../icons/tray.png"))`.
 
@@ -365,7 +365,6 @@ These should all hold; if you're modifying anything in this list, verify it afte
 ## TODOs
 
 - [ ] Move API key to Keychain.
-- [ ] Switch notifications from `NSUserNotification` to `UNUserNotification` (upstream — file an issue against `tauri-plugin-notification`).
 - [ ] Composer voice picker is currently a click-to-cycle button; replace with a popover for >3 voices.
 - [ ] Honour `Retry-After` from `429` responses in the composer (currently just shown in the message).
 - [ ] Optionally add a Refresh-on-focus interval for `/voices` (currently only refreshes on launch + after Settings save + tray menu).

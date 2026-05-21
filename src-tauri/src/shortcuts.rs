@@ -17,9 +17,7 @@ pub fn register<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let gs = app.global_shortcut();
 
     if let Err(e) = gs.register(reply_shortcut) {
-        let app_clone = app.clone();
         notify(
-            &app_clone,
             "Cal.ai",
             &format!(
                 "Could not register Cmd+Option+R: {e}. Grant Accessibility in System Settings → Privacy & Security."
@@ -28,9 +26,7 @@ pub fn register<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     }
 
     if let Err(e) = gs.register(composer_shortcut) {
-        let app_clone = app.clone();
         notify(
-            &app_clone,
             "Cal.ai",
             &format!(
                 "Could not register Cmd+Shift+R: {e}. Another app may be using it."
@@ -60,7 +56,7 @@ pub fn handle_shortcut<R: Runtime>(
             state.snapshot()
         };
         if snapshot.api_key.is_none() {
-            notify(app, "Cal.ai", "API key missing — open Settings to configure.");
+            notify("Cal.ai", "API key missing — open Settings to configure.");
             let _ = show_or_create_window(app, WindowKind::Settings);
             return;
         }

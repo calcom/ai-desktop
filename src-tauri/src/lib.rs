@@ -1,6 +1,6 @@
 mod api;
 mod commands;
-mod notification_permission;
+mod notifications;
 mod shortcuts;
 mod state;
 mod tray;
@@ -50,7 +50,7 @@ pub fn run() {
             // Ask for notification access up front so the first workflow
             // notification can carry useful status instead of triggering the
             // system permission prompt mid-flow.
-            notification_permission::request_on_launch();
+            notifications::request_on_launch();
 
             // Initialize app state from persisted store.
             let app_state = AppState::load(app.handle());

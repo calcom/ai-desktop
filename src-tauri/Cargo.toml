@@ -1,6 +1,6 @@
 [package]
 name = "calai"
-version = "0.1.1"
+version = "0.1.2"
 description = "Cal.ai support reply assistant"
 authors = ["Cal.com"]
 edition = "2021"
@@ -31,4 +31,4 @@ futures-util = "0.3"
 block2 = "0.6"
 objc2 = "0.6"
 objc2-foundation = "0.3"
-objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNUserNotificationCenter", "UNNotificationSettings", "block2"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "UNUserNotificationCenter", "UNNotificationSettings", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "block2"] }
